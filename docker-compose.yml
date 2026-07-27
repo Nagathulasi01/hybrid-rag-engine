@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    restart: always
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      # Uncomment to use OpenAI instead of Ollama
+      # - OPENAI_API_KEY=your-api-key
+      # Uncomment and point to your local Ollama instance if needed
+      # - LLM_BASE_URL=http://host.docker.internal:11434/v1
+    depends_on:
+      - qdrant
+    volumes:
+      # Optional: mount huggingface cache to avoid re-downloading models
+      - hf_cache:/root/.cache/huggingface
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend.Dockerfile
+    ports:
+      - "8501:8501"
+    environment:
+      - API_URL=http://backend:8000
+    depends_on:
+      - backend
+
+volumes:
+  qdrant_data:
+  hf_cache:

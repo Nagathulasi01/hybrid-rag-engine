@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+temp_uploads/
+.pytest_cache/
+.coverage
+eval_report.json
