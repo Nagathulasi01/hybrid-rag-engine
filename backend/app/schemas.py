@@ -19,4 +19,12 @@ class QueryResponse(BaseModel):
 class IngestResponse(BaseModel):
     status: str
     message: str
-    chunks_processed: int
+    chunks_processed: int = Field(0, description="Number of chunks processed so far.")
+    job_id: Optional[str] = Field(None, description="Background ingestion job identifier.")
+
+class IngestJobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    message: str
+    chunks_processed: int = Field(0, description="Number of chunks processed so far.")
+    error: Optional[str] = Field(None, description="Error details if ingestion failed.")

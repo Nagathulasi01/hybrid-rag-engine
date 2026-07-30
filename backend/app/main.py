@@ -1,12 +1,15 @@
+import asyncio
 import os
 import shutil
 import logging
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import uuid
+from typing import Any, Dict
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 from .config import settings
-from .schemas import QueryRequest, QueryResponse, IngestResponse
+from .schemas import QueryRequest, QueryResponse, IngestResponse, IngestJobStatusResponse
 from .rag.document_parser import parse_and_chunk
 from .rag.retriever import RAGRetriever
 from .rag.generator import Generator
@@ -16,6 +19,55 @@ logger = logging.getLogger(__name__)
 # Initialize components globally to avoid reloading on every request
 retriever = None
 generator = None
+ingest_jobs: Dict[str, Dict[str, Any]] = {}
+
+
+def _ensure_retriever():
+    global retriever
+    if retriever is None:
+        retriever = RAGRetriever()
+    return retriever
+
+
+def _ensure_generator():
+    global generator
+    if generator is None:
+        generator = Generator()
+    return generator
+
+
+def _update_job(job_id: str, **updates: Any) -> None:
+    if job_id not in ingest_jobs:
+        ingest_jobs[job_id] = {}
+    ingest_jobs[job_id].update(updates)
+
+
+async def _process_ingestion_job(job_id: str, temp_file_path: str, filename: str) -> None:
+    _update_job(job_id, status="processing", message=f"Processing {filename}", chunks_processed=0, error=None)
+    try:
+        retriever_instance = _ensure_retriever()
+        chunks = await asyncio.to_thread(parse_and_chunk, temp_file_path)
+        await asyncio.to_thread(retriever_instance.ingest, chunks)
+        _update_job(
+            job_id,
+            status="completed",
+            message=f"Successfully ingested {filename}",
+            chunks_processed=len(chunks),
+            error=None,
+        )
+    except Exception as exc:
+        logger.error(f"Background ingestion failed for {filename}: {exc}", exc_info=True)
+        _update_job(
+            job_id,
+            status="failed",
+            message=f"Ingestion failed for {filename}",
+            chunks_processed=0,
+            error=str(exc),
+        )
+    finally:
+        if os.path.exists(temp_file_path):
+            os.remove(temp_file_path)
+            logger.info(f"Cleaned up temporary file: {temp_file_path}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -105,46 +157,58 @@ async def readiness_check():
     return JSONResponse(status_code=status_code, content=payload)
 
 @app.post("/ingest", response_model=IngestResponse)
-async def ingest_document(file: UploadFile = File(...)):
+async def ingest_document(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
     if not file.filename.endswith(settings.ALLOWED_EXTENSIONS):
         logger.warning(f"Invalid file type uploaded: {file.filename}")
         raise HTTPException(status_code=400, detail=f"Only {', '.join(settings.ALLOWED_EXTENSIONS)} files are supported.")
-    
+
     # Save file temporarily in a local temp directory
     temp_dir = os.path.join(os.getcwd(), settings.TEMP_UPLOAD_DIR)
     os.makedirs(temp_dir, exist_ok=True)
     temp_file_path = os.path.join(temp_dir, file.filename)
-    
+
+    job_id = str(uuid.uuid4())
+    ingest_jobs[job_id] = {
+        "job_id": job_id,
+        "status": "queued",
+        "message": f"Queued ingestion for {file.filename}",
+        "chunks_processed": 0,
+        "error": None,
+    }
+
     try:
         logger.info(f"Receiving file: {file.filename}")
         with open(temp_file_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
-        
-        # 1. Parse and chunk
-        chunks = parse_and_chunk(temp_file_path)
-        
-        # 2. Ingest into Qdrant via Retriever
-        retriever.ingest(chunks)
-        
-        logger.info(f"Successfully ingested {len(chunks)} chunks from {file.filename}")
+
+        background_tasks.add_task(_process_ingestion_job, job_id, temp_file_path, file.filename)
         return IngestResponse(
-            status="success",
-            message=f"Successfully ingested {file.filename}",
-            chunks_processed=len(chunks)
+            status="queued",
+            message=f"Ingestion started for {file.filename}",
+            chunks_processed=0,
+            job_id=job_id,
         )
     except Exception as e:
         logger.error(f"Error ingesting file {file.filename}: {e}", exc_info=True)
+        _update_job(job_id, status="failed", message=f"Ingestion failed for {file.filename}", chunks_processed=0, error=str(e))
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-            logger.info(f"Cleaned up temporary file: {temp_file_path}")
+
+
+@app.get("/ingest/{job_id}/status", response_model=IngestJobStatusResponse)
+async def ingest_status(job_id: str):
+    job = ingest_jobs.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return IngestJobStatusResponse(**job)
 
 @app.post("/query", response_model=QueryResponse)
 async def query_pipeline(request: QueryRequest):
     try:
+        retriever_instance = _ensure_retriever()
+        generator_instance = _ensure_generator()
+
         # 1. Retrieve & Rerank Context
-        top_k_results = retriever.search(
+        top_k_results = retriever_instance.search(
             query=request.query,
             top_k=request.top_k,
             use_hybrid=request.use_hybrid
@@ -158,7 +222,7 @@ async def query_pipeline(request: QueryRequest):
             
         # 2. Generate Answer
         context_texts = [res.content for res in top_k_results]
-        answer = generator.generate(request.query, context_texts)
+        answer = generator_instance.generate(request.query, context_texts)
         
         # 3. Format Response
         logger.info(f"Generated answer for query: '{request.query}'")
