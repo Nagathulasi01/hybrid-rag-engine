@@ -3,12 +3,14 @@ from typing import List, Tuple, Dict, Any
 from sentence_transformers import SentenceTransformer
 from fastembed import SparseTextEmbedding
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 class Embedder:
     """Handles generation of dense and sparse embeddings for Hybrid RAG."""
     
-    def __init__(self, dense_model_name: str = 'all-MiniLM-L6-v2', sparse_model_name: str = 'prithivida/Splade_PP_en_v1'):
+    def __init__(self, dense_model_name: str = settings.DENSE_MODEL_NAME, sparse_model_name: str = settings.SPARSE_MODEL_NAME):
         # Dense Model (Sentence-Transformers)
         logger.info(f"Loading dense model: {dense_model_name}")
         self.dense_model = SentenceTransformer(dense_model_name)

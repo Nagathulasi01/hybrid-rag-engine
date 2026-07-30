@@ -4,6 +4,7 @@ import logging
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from contextlib import asynccontextmanager
 
+from .config import settings
 from .schemas import QueryRequest, QueryResponse, IngestResponse
 from .rag.document_parser import parse_and_chunk
 from .rag.retriever import RAGRetriever
@@ -28,9 +29,9 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down API...")
 
 app = FastAPI(
-    title="Hybrid RAG API",
-    description="Portfolio-grade Hybrid RAG Pipeline API",
-    version="1.0.0",
+    title=settings.APP_TITLE,
+    description=settings.APP_DESCRIPTION,
+    version=settings.APP_VERSION,
     lifespan=lifespan
 )
 
@@ -40,12 +41,12 @@ async def health_check():
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest_document(file: UploadFile = File(...)):
-    if not file.filename.endswith(('.pdf', '.txt')):
+    if not file.filename.endswith(settings.ALLOWED_EXTENSIONS):
         logger.warning(f"Invalid file type uploaded: {file.filename}")
-        raise HTTPException(status_code=400, detail="Only .pdf and .txt files are supported.")
+        raise HTTPException(status_code=400, detail=f"Only {', '.join(settings.ALLOWED_EXTENSIONS)} files are supported.")
     
     # Save file temporarily in a local temp directory
-    temp_dir = os.path.join(os.getcwd(), "temp_uploads")
+    temp_dir = os.path.join(os.getcwd(), settings.TEMP_UPLOAD_DIR)
     os.makedirs(temp_dir, exist_ok=True)
     temp_file_path = os.path.join(temp_dir, file.filename)
     

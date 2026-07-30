@@ -4,6 +4,8 @@ import pdfplumber
 from typing import List, Dict, Any
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 def parse_pdf(file_path: str) -> str:
@@ -37,7 +39,7 @@ def parse_txt(file_path: str) -> str:
     with open(file_path, 'r', encoding='utf-8') as f:
         return f.read()
 
-def parse_and_chunk(file_path: str, chunk_size: int = 500, chunk_overlap: int = 50) -> List[Dict[str, str]]:
+def parse_and_chunk(file_path: str, chunk_size: int = settings.CHUNK_SIZE, chunk_overlap: int = settings.CHUNK_OVERLAP) -> List[Dict[str, str]]:
     """
     Parses a document (PDF or TXT) and splits it into chunks.
     

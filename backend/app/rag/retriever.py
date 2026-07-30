@@ -5,6 +5,8 @@ from typing import List, Dict, Any
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams, SparseVectorParams, PointStruct
 
+from ..config import settings
+
 logger = logging.getLogger(__name__)
 
 from .embedder import Embedder
@@ -13,11 +15,11 @@ from .reranker import Reranker
 class RAGRetriever:
     """Handles communication with Qdrant and executes Hybrid Search + RRF."""
     
-    def __init__(self, collection_name: str = "hybrid_rag_docs"):
+    def __init__(self, collection_name: str = settings.COLLECTION_NAME):
         self.collection_name = collection_name
         
         # Connect to Qdrant (use local in-memory or Docker container if QDRANT_URL is set)
-        qdrant_url = os.getenv("QDRANT_URL", ":memory:")
+        qdrant_url = settings.QDRANT_URL or ":memory:"
         logger.info(f"Connecting to Qdrant at {qdrant_url}")
         
         if qdrant_url == ":memory:":
@@ -37,8 +39,8 @@ class RAGRetriever:
                 collection_name=self.collection_name,
                 vectors_config={
                     "dense": VectorParams(
-                        size=384, # all-MiniLM-L6-v2 dimension
-                        distance=Distance.COSINE
+                        size=settings.DENSE_VECTOR_SIZE,
+                        distance=getattr(Distance, settings.VECTOR_DISTANCE)
                     )
                 },
                 sparse_vectors_config={
@@ -83,7 +85,7 @@ class RAGRetriever:
         )
         logger.info(f"Ingested {len(points)} chunks into Qdrant.")
 
-    def _rrf(self, dense_results: List[Any], sparse_results: List[Any], k: int = 60) -> List[Dict[str, Any]]:
+    def _rrf(self, dense_results: List[Any], sparse_results: List[Any], k: int = settings.RRF_K) -> List[Dict[str, Any]]:
         """
         Reciprocal Rank Fusion (RRF) algorithm.
         Score = 1 / (k + rank)
@@ -128,7 +130,7 @@ class RAGRetriever:
         dense_q, sparse_q = self.embedder.embed_queries(query)
         
         # Increase initial retrieval limit for better reranking pool
-        initial_k = top_k * 4 
+        initial_k = top_k * settings.INITIAL_RETRIEVAL_MULTIPLIER 
         
         dense_results = self.client.search(
             collection_name=self.collection_name,
