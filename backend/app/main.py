@@ -2,6 +2,7 @@ import os
 import shutil
 import logging
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 
 from .config import settings
@@ -20,10 +21,15 @@ generator = None
 async def lifespan(app: FastAPI):
     global retriever, generator
     logger.info("Initializing RAG components on startup...")
-    # Load models and connect to DB on startup
-    retriever = RAGRetriever()
-    generator = Generator()
-    logger.info("RAG components initialized.")
+    try:
+        # Load models and connect to DB on startup
+        retriever = RAGRetriever()
+        generator = Generator()
+        logger.info("RAG components initialized.")
+    except Exception as exc:
+        logger.warning("RAG component initialization failed during startup: %s", exc, exc_info=True)
+        retriever = None
+        generator = None
     yield
     # Cleanup on shutdown if necessary
     logger.info("Shutting down API...")
@@ -35,9 +41,68 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+def _get_qdrant_status() -> dict:
+    if retriever is None or getattr(retriever, "client", None) is None:
+        return {"status": "not_initialized", "detail": "Qdrant client has not been initialized yet."}
+
+    qdrant_url = settings.QDRANT_URL or ":memory:"
+    if qdrant_url == ":memory:":
+        return {"status": "ok", "detail": "Using in-memory Qdrant storage."}
+
+    try:
+        retriever.client.get_collections()
+        return {"status": "ok", "detail": f"Connected to {qdrant_url}."}
+    except Exception as exc:
+        logger.warning(f"Qdrant health check failed: {exc}")
+        return {"status": "error", "detail": str(exc)}
+
+
+def _get_llm_status() -> dict:
+    if settings.LLM_PROVIDER == "openai":
+        if settings.OPENAI_API_KEY:
+            return {"status": "ok", "detail": "OpenAI provider configured with an API key."}
+        return {"status": "error", "detail": "OpenAI provider selected but OPENAI_API_KEY is missing."}
+
+    if settings.LLM_BASE_URL:
+        return {"status": "ok", "detail": f"Ollama provider configured with {settings.LLM_BASE_URL}."}
+
+    return {"status": "error", "detail": "Ollama provider selected but LLM_BASE_URL is missing."}
+
+
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "message": "API is running."}
+    qdrant_status = _get_qdrant_status()
+    llm_status = _get_llm_status()
+    overall_status = "ok"
+    if qdrant_status["status"] != "ok" or llm_status["status"] != "ok":
+        overall_status = "degraded"
+
+    return {
+        "status": overall_status,
+        "message": "API is running.",
+        "dependencies": {
+            "qdrant": qdrant_status,
+            "llm": llm_status,
+        },
+    }
+
+
+@app.get("/ready")
+async def readiness_check():
+    qdrant_status = _get_qdrant_status()
+    llm_status = _get_llm_status()
+    is_ready = qdrant_status["status"] == "ok" and llm_status["status"] == "ok"
+
+    payload = {
+        "status": "ready" if is_ready else "not_ready",
+        "dependencies": {
+            "qdrant": qdrant_status,
+            "llm": llm_status,
+        },
+    }
+    status_code = 200 if is_ready else 503
+    return JSONResponse(status_code=status_code, content=payload)
 
 @app.post("/ingest", response_model=IngestResponse)
 async def ingest_document(file: UploadFile = File(...)):
